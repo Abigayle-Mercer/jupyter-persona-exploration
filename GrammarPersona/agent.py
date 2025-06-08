@@ -148,7 +148,6 @@ async def run_langgraph_agent(
     ychat,
     tools,
     notebook: YNotebook,
-    user_prompt: str,
     tone_prompt,
     self_id,
     get_active_cell,
@@ -336,11 +335,18 @@ async def run_langgraph_agent(
                     active_cell_id = None
 
                 edited_cells = get_edited_cells()
+                edited_indices = []
+                for eid in edited_cells:
+                    for idx, cell in enumerate(notebook_cells):
+                        if cell.get("id") == eid:
+                            edited_indices.append(idx)
+                            break
 
                 tool_output["notebook_snapshot"] = {
                     "cells": notebook_cells,
                     "activeCellId": active_cell_id,
                     "editedCells": edited_cells,
+                    "editedIndices": edited_indices,
                 }
 
             results.append((call, tool_output))
@@ -379,9 +385,27 @@ async def run_langgraph_agent(
     You may only call one tool at a time. If you want to perform multiple actions, wait for confirmation and state each one step by step.
     Please focus on tool calls and not sending messages to the user. 
     Please start by calling read_notebook.
-    
     """
 
+    read_nb = tool_groups["read_notebook"]["callable"]
+    notebook_contents_str = await read_nb(notebook)
+    notebook_cells = json.loads(notebook_contents_str)
+
+    # find the edited IDs and map them back to full cell dicts
+    edited_ids = get_edited_cells()
+    edited_cell_objects = [
+        cell for cell in notebook_cells if cell.get("id") in edited_ids
+    ]
+    current_cell = get_active_cell(notebook)
+    # Build a prompt with actual cells
+    user_prompt = f"""
+    The user is currently editing in cell {current_cell}, so DO NOT write to or delete that cell.
+
+    Below are the full cell objects you have already edited—do not touch *any* of them.  
+    {json.dumps(edited_cell_objects, indent=2)}
+
+    You can *only* write to other cells in the notebook.
+    """
     logger.info(f"PROMPT: {system_prompt}")
     logger.info(f"PROMPT: {user_prompt}")
     state = {

@@ -106,9 +106,7 @@ class GrammarEditor(BasePersona):
         self.log.warning(f"❌ No active notebook found for client_id: {client_id}")
         return None
 
-    async def run_langgraph_agent(
-        self, notebook: YNotebook, user_prompt: str, tone_prompt
-    ):
+    async def run_langgraph_agent(self, notebook: YNotebook, tone_prompt):
         handler = CallContext.get(CallContext.JUPYTER_HANDLER)
         serverapp = handler.serverapp
         handler = CallContext.get(CallContext.JUPYTER_HANDLER)
@@ -122,7 +120,6 @@ class GrammarEditor(BasePersona):
             self.ychat,
             raw_tools,
             notebook,
-            user_prompt,
             tone_prompt,
             self.id,
             self.get_active_cell,
@@ -130,10 +127,10 @@ class GrammarEditor(BasePersona):
             self.get_edited_cells,
         )
 
-    async def _run_with_flag_reset(self, ynotebook, prompt, tone_prompt):
+    async def _run_with_flag_reset(self, ynotebook, tone_prompt):
         """Run the LangGraph agent with the given prompts and clear the busy flag."""
         try:
-            await self.run_langgraph_agent(ynotebook, prompt, tone_prompt)
+            await self.run_langgraph_agent(ynotebook, tone_prompt)
         finally:
             self._collab_task_in_progress = False
 
@@ -158,14 +155,9 @@ class GrammarEditor(BasePersona):
                     )
                 )
 
-                prompt = f"""The user is currently editing in cell {current_cell} so, to avoid disrupting their work, DO NOT write to, or delete that cell. 
-                Additionally, the following cells have already been edited by you, the agent, and thus SHOULD NOT be written to: {self._edited_cells}
-                DO NOT UNDER ANY CIRCUMSTANCES WRITE TO THE CELLS THAT HAVE BEEN ALREADY EDITED BY YOU. ANY CELL IN THAT LIST IS A CELL THAT WAS PREVIOSLY EDITED BY YOU. 
-                You can only edit in the rest of the notebook cells"""
-
                 self._collab_task_in_progress = True
                 self._running_task = asyncio.create_task(
-                    self._run_with_flag_reset(ynotebook, prompt, tone_prompt)
+                    self._run_with_flag_reset(ynotebook, tone_prompt)
                 )
 
         awareness = ynotebook.awareness
