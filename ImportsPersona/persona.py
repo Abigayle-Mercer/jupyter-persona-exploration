@@ -26,7 +26,7 @@ class State(TypedDict):
     messages: list
 
 
-class CodeCommenter(BasePersona):
+class ImportsPersona(BasePersona):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -34,24 +34,16 @@ class CodeCommenter(BasePersona):
         self._notebooks = {}
         self._collab_task_in_progress = False
         self._global_awareness_observer = None
-        self._edited_cells = []
 
     @property
     def defaults(self):
         return PersonaDefaults(
-            name="CodeCommenter",
-            description="A Jupyter AI Assistant who can write to notebooks to add comments",
+            name="ImportsPersona",
+            description="A Jupyter AI Assistant to add imports to the top of a notebook.",
             avatar_path="/api/ai/static/jupyternaut.svg",
             system_prompt="You are a function-calling assistant operating inside a JupyterLab environment, use your tools to operate on the notebook!",
         )
 
-    def set_edited_cells(self, cell):
-        """Record that the agent has edited the given cell."""
-        self._edited_cells.append(cell)
-
-    def get_edited_cells(self):
-        """Return the list of cell IDs that have already been edited."""
-        return self._edited_cells
 
     def get_active_cell(self, notebook):
         """Return the ID of the currently selected cell of a given notebook, or None if none are active."""
@@ -106,7 +98,7 @@ class CodeCommenter(BasePersona):
         self.log.warning(f"❌ No active notebook found for client_id: {client_id}")
         return None
 
-    async def run_langgraph_agent(self, notebook: YNotebook, tone_prompt):
+    async def run_langgraph_agent(self, notebook: YNotebook,):
         handler = CallContext.get(CallContext.JUPYTER_HANDLER)
         serverapp = handler.serverapp
         handler = CallContext.get(CallContext.JUPYTER_HANDLER)
@@ -120,21 +112,18 @@ class CodeCommenter(BasePersona):
             self.ychat,
             raw_tools,
             notebook,
-            tone_prompt,
             self.id,
             self.get_active_cell,
-            self.set_edited_cells,
-            self.get_edited_cells,
         )
 
-    async def _run_with_flag_reset(self, ynotebook, tone_prompt):
+    async def _run_with_flag_reset(self, ynotebook):
         """Run the LangGraph agent with the given prompts and clear the busy flag."""
         try:
-            await self.run_langgraph_agent(ynotebook, tone_prompt)
+            await self.run_langgraph_agent(ynotebook)
         finally:
             self._collab_task_in_progress = False
 
-    def start_collaborative_session(self, ynotebook: YNotebook, path: str, tone_prompt):
+    def start_collaborative_session(self, ynotebook: YNotebook, path: str):
         """
         Observes awareness (cursor position, etc) and reacts when a user changes their selection.
         """
@@ -145,7 +134,6 @@ class CodeCommenter(BasePersona):
                 return
 
             current_cell = self.get_active_cell(ynotebook)
-            self.log.info(f"CURRENT CELL IS: {current_cell}")
             last_cell = self._notebooks[path]["activeCell"]
             if current_cell != last_cell:
                 self._notebooks[path]["activeCell"] = current_cell
@@ -158,7 +146,7 @@ class CodeCommenter(BasePersona):
 
                 self._collab_task_in_progress = True
                 self._running_task = asyncio.create_task(
-                    self._run_with_flag_reset(ynotebook, tone_prompt)
+                    self._run_with_flag_reset(ynotebook)
                 )
 
         awareness = ynotebook.awareness
@@ -166,7 +154,7 @@ class CodeCommenter(BasePersona):
         self._notebooks[path]["observer"] = (awareness, unsubscribe)
         self.log.info(f"✅ Awareness observer registered for notebook: {path}")
 
-    async def _handle_global_awareness_change(self, client_id, tone_prompt):
+    async def _handle_global_awareness_change(self, client_id):
         """Respond to a global awareness update by tracking the newly active notebook.
 
         If the user switches to a different notebook (based on global awareness state),
@@ -196,14 +184,14 @@ class CodeCommenter(BasePersona):
             }
             if notebook:
                 self.start_collaborative_session(
-                    notebook, active_notebook_path, tone_prompt
+                    notebook, active_notebook_path
                 )
             else:
                 self.log.info(
                     f"THERE WAS NO COLLABORATIVE NOTEBOOK OBSERVER STARTED FOR {active_notebook_path}"
                 )
 
-    async def start_global_observation(self, client_id, tone_prompt):
+    async def start_global_observation(self, client_id):
         """
         Observes awareness changes in global awarness
         """
@@ -218,7 +206,7 @@ class CodeCommenter(BasePersona):
 
         def on_awareness_change(event_type, data):
             asyncio.create_task(
-                self._handle_global_awareness_change(client_id, tone_prompt)
+                self._handle_global_awareness_change(client_id)
             )
 
         awareness = doc.awareness
@@ -234,13 +222,13 @@ class CodeCommenter(BasePersona):
 
         @tool
         async def start_collaborative_session() -> str:
-            """Starts a comment adding collaborative session. Optionally accepts a tone prompt."""
-            await self.start_global_observation(client_id, "")
+            """Starts a comment adding collaborative session. """
+            await self.start_global_observation(client_id)
             return f"Collaborative session started."
 
         @tool
         async def stop_collaborative_session() -> str:
-            """Stops the current collaborative comment adding session."""
+            """Stops the current collaborative session."""
 
             # Unregister global awareness observer
             if self._global_awareness_observer:

@@ -5,8 +5,6 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from jupyterlab_chat.models import Message, NewMessage
 from jupyter_ydoc.ynotebook import YNotebook
-from langgraph.store.memory import InMemoryStore
-
 import random
 import numpy as np
 import difflib
@@ -23,10 +21,6 @@ import os
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = api_key
-
-
-memory = MemorySaver()
-in_memory_store = InMemoryStore()
 
 
 def convert_mcp_to_openai(tools: list[dict]) -> list[dict]:
@@ -49,16 +43,14 @@ def convert_mcp_to_openai(tools: list[dict]) -> list[dict]:
     return openai_tools
 
 
-
 def human_typing_delay(
-    base: float = 0.005,   # cut base in half
-    std: float = 0.01,     # cut variance in half
-    min_delay: float = 0.001,
-    max_delay: float = 0.05,  # cap max much lower
-) -> float:
-    d = np.random.normal(base, std)
-    return max(min_delay, min(d, max_delay))
-
+    base=0.01,
+    std=0.03,
+    min_delay=0.002,
+    max_delay=0.2,
+):
+    delay = np.random.normal(loc=base, scale=std)
+    return max(min_delay, min(delay, max_delay))
 
 
 async def write_to_cell(
@@ -79,15 +71,7 @@ async def write_to_cell(
     ---THIS IS TEMPERARY, MAY BE MERGED INTO JUPYTER-AI-TOOLS IF SUCCESSFUL---
     """
     try:
-        
         ycell = ynotebook.get_cell(index)
-        if ycell["cell_type"] != "markdown": 
-            indices = [
-            i for i in range(len(ynotebook._ycells))
-            if ynotebook.get_cell(i)["cell_type"] == "markdown"
-            ]
-            return f"❌ Cannot write to a code cell at index {index}. Try writing to these markdown cell indices instead: {indices}"
-
         old = ycell["source"]
         new = content
 
@@ -153,27 +137,12 @@ async def write_to_cell(
     except Exception as e:
         return f"❌ Error editing cell {index}: {str(e)}"
 
-write_to_markdown_cell_metadata = {
-    "name": "write_to_markdown_cell",
-    "description": "Overwrite the source of a markdown cell with content at the given index "
-    "in the notebook.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "index": {"type": "integer", "description": "The index to write at"},
-            "content": {
-                "type": "string",
-                "description": "The markdown content to write into the cell",
-            },
-        },
-        "required": ["index", "content"],
-    },
-}
+
 class State(TypedDict):
     messages: list
 
 
-async def create_langgraph_agent(
+async def run_langgraph_agent(
     extension_manager,
     logger,
     ychat,
@@ -185,14 +154,14 @@ async def create_langgraph_agent(
     raw_tools = tools
     logger.info(f"TOOL GROUPS: {raw_tools}")
     tool_groups = {t["metadata"]["name"]: t for t in raw_tools}
+    # for now, to add imports the agent only needs read_notebook and write_to_cell
     tools = [
     t["metadata"]
     for t in raw_tools
-    if t["metadata"]["name"] in ("read_notebook", "get_max_cell_index", "write_to_cell", "delete_cell")
+    if t["metadata"]["name"] in ("read_notebook", "write_to_cell", "add_cell", "delete_cell")
     ]
-    #tools.append(write_to_markdown_cell_metadata)
-        
-    # need to filter here
+   
+
 
     logger.info(f"TOOLS: {tools}")
 
@@ -237,7 +206,6 @@ async def create_langgraph_agent(
                 full_chunk += chunk
 
             content = getattr(chunk, "content", "")
-            """
             if content:
                 if stream_message_id is None:
                     stream_message_id = ychat.add_message(
@@ -254,7 +222,7 @@ async def create_langgraph_agent(
                         ),
                         append=True,
                     )
-            """
+
         full_message = AIMessage(
             content=full_chunk.content if full_chunk else "",
             additional_kwargs=full_chunk.additional_kwargs if full_chunk else {},
@@ -296,7 +264,6 @@ async def create_langgraph_agent(
             tool_name = call["function"]["name"]
 
             # ✅ Stream "calling tool" message
-            """
             calling_msg = f"🔧 Calling {tool_name}...\n"
             stream_msg_id = ychat.add_message(NewMessage(body="", sender=self_id))
 
@@ -312,7 +279,7 @@ async def create_langgraph_agent(
                     ),
                     append=True,
                 )
-            """
+
             # if write_to_cell, call the custom one: THIS IS JUST FOR TESTING PURPOSES
             if tool_name == "write_to_cell":
                 # Parse arguments from the tool call
@@ -339,21 +306,38 @@ async def create_langgraph_agent(
                     parse_fn=parse_openai_tool_call,
                 )
             logger.info(f"TOOL RESULTS: {result}")
-            tool_result = result
+            tool_result = result[0]
+
+            # If the result is a coroutine, await it
+            if asyncio.iscoroutine(tool_result):
+                logger.warning(
+                    "⚠️ Tool returned a coroutine — awaiting it before serialization."
+                )
+                tool_result = await tool_result
 
             tool_output = {"result": str(tool_result)}
 
-            # give the agebt an updated version of the active cell ID
-            try:
-                active_cell_id = get_active_cell(notebook)
-            except Exception as e:
-                logger.warning(f"❌ Failed to get active cell ID: {e}")
-                active_cell_id = None
+            # If it's a notebook-mutating tool, capture post-edit state - makes sure agent agnet is up to date in long running workflows
+            if tool_name in {"write_to_cell", "add_cell", "delete_cell"}:
+                read_nb = tool_groups["read_notebook"]["callable"]
 
+                try:
+                    notebook_contents_str = await read_nb(notebook)
+                    notebook_cells = json.loads(notebook_contents_str)
+                except Exception as e:
+                    logger.warning(f"❌ Failed to read or parse notebook contents: {e}")
+                    notebook_cells = []
 
-            tool_output["Current-Active-Cell"] = {
-                "activeCellId": active_cell_id,
-            }
+                try:
+                    active_cell_id = get_active_cell(notebook)
+                except Exception as e:
+                    logger.warning(f"❌ Failed to get active cell ID: {e}")
+                    active_cell_id = None
+
+                tool_output["notebook_snapshot"] = {
+                    "cells": notebook_cells,
+                    "activeCellId": active_cell_id,
+                }
 
             results.append((call, tool_output))
         # Format all results as ToolMessages
@@ -382,44 +366,38 @@ async def create_langgraph_agent(
     workflow.add_edge("call_tool", "agent")
 
     compiled = workflow.compile(checkpointer=memory)
-    return compiled
 
-
-async def run_langgraph_agent(logger, agent, message_history, tone_prompt, current_cell):
     system_prompt = f"""
     You are a function-calling assistant operating inside a JupyterLab environment.
-    Your job is to read the entire notebook and help finish and edit markdown cells. The user may express intent to
-    help finish a markdown cell using 'TODO: ....'. Use the context of the surrounding notebook to help you write descriptions
-    of what's happening IN THE CELL WITH THE TODO request. DO NOT EDIT ANYWHERE ELSE. 
-    You must only write to markdown cells. If you find grammar mistakes in markdown cells fix them using your available tools.
-    Only operate on markdown cells please. 
-    Along with fixing grammatical mistakes, please adapt markdown text to the following tone: {tone_prompt}
+    Your job is to read the entire notebook and make the code cells comply with 
+    black code formatting, and sort imports. 
+
     You may only call one tool at a time. If you want to perform multiple actions, wait for confirmation and state each one step by step.
     Please focus on tool calls and not sending messages to the user. 
     Please start by calling read_notebook.
-    Then call write_to_cell. 
-    These are your PREVIOUS tool calls, if you're already edited these cells, DO NOT edit them again UNLESS they have changed. 
-    {message_history}
     """
 
-    # Build a prompt with actual cells
+
+
+    current_cell = get_active_cell(notebook)
+
     user_prompt = f"""
     The user is currently editing in cell {current_cell}, so DO NOT write to or delete that cell.
     You can *only* write to other cells in the notebook.
     """
     logger.info(f"PROMPT: {system_prompt}")
     logger.info(f"PROMPT: {user_prompt}")
-
-
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-    
+    state = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+    }
     config = {"configurable": {"thread_id": "thread-1"}}
 
-    logger.info(f"MESSAGES: {messages}")
-    messages = await agent.ainvoke({"messages": messages}, config=config)
-    return messages
+    await compiled.ainvoke(state, config=config)
 
-"""
+
 async def run_supervisor_agent(logger, stream, user_message: str, tools):
     memory = MemorySaver()
     llm = ChatOpenAI(temperature=0, streaming=True).bind_tools(tools=tools)
@@ -484,10 +462,9 @@ async def run_supervisor_agent(logger, stream, user_message: str, tools):
 
     compiled = workflow.compile(checkpointer=memory)
 
-    system_prompt = ""
-        You are a helpful assistant that can start or stop a collaborative grammar editing session.
-        The user may describe their tone preferences for the way they want their markdown cells edited. 
-        ""
+    system_prompt = """
+        You are a helpful assistant that can start or stop a collaborative editng session with an agent.
+        """
     state = {
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -497,114 +474,3 @@ async def run_supervisor_agent(logger, stream, user_message: str, tools):
     config = {"configurable": {"thread_id": "thread-1"}}
     logger.info("HERE")
     await compiled.ainvoke(state, config=config)
-
-"""
-
-
-async def create_supervisor_agent(logger, stream, tools):
-    llm = ChatOpenAI(temperature=0, streaming=True).bind_tools(tools=tools)
-
-    async def agent(state: Dict[str, Any]) -> Dict[str, Any]:
-        messages = state["messages"]
-
-        response = await llm.ainvoke(messages)
-        await stream(response.content or "")
-
-        return {"messages": messages + [response]}
-
-    def should_continue(state):
-        last_message = state["messages"][-1]
-        if (
-            isinstance(last_message, AIMessage)
-            and "tool_calls" in last_message.additional_kwargs
-        ):
-            return "continue"
-        if isinstance(last_message, ToolMessage):
-            return "continue"
-        return "end"
-
-    async def call_tool(state: Dict[str, Any]) -> Dict[str, Any]:
-        last_msg = state["messages"][-1]
-        tool_calls = last_msg.additional_kwargs.get("tool_calls", [])
-        results = []
-
-        for call in tool_calls:
-            name = call["function"]["name"]
-            args = json.loads(call["function"]["arguments"])
-            logger.info(f"Calling tool: {name} with args: {args}")
-
-            # Look up tool by name
-            for tool in tools:
-                if tool.name == name:
-                    result = await tool.ainvoke(args)
-                    await stream(f"🔧 {name} executed: {result}")
-                    tool_message = ToolMessage(
-                        tool_call_id=call["id"],
-                        name=name,
-                        content=json.dumps({"result": result}),
-                    )
-                    results.append(tool_message)
-                    break
-            else:
-                logger.warning(f"No tool found for {name}")
-
-        return {"messages": state["messages"] + results}
-
-    workflow = StateGraph(State)
-    workflow.add_node("agent", agent)
-    workflow.add_node("call_tool", call_tool)
-    workflow.set_entry_point("agent")
-    workflow.add_edge(START, "agent")
-    workflow.add_conditional_edges(
-        "agent", should_continue, {"continue": "call_tool", "end": END}
-    )
-    workflow.add_edge("call_tool", "agent")
-
-    compiled = workflow.compile(
-        checkpointer=memory,
-        store=in_memory_store
-        
-    )
-    return compiled
-
-
-
-async def run_supervisor_agent(logger, compiled, user_message, message_history): 
-    system_prompt = """
-        You are a helpful assistant that can start or stop a collaborative grammar editing session.
-        The user may describe their tone preferences for the way they want their markdown cells edited. 
-        ONLY add a tone prompt to start_collaborative_session if the user has specified one. Otherwise set it 
-        to an empty string. 
-        """
-    
-    
-    if message_history != None: 
-        logger.info(f"MESSAGE HISTORY: {message_history}")
-        prev = message_history["messages"]
-        logger.info(f"PREV: {prev}")
-        prev.append({"role": "system", "content": system_prompt})
-        prev.append({"role": "user", "content": user_message})
-        messages = prev.copy()
-    else: 
-        messages = [{"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}]
-
-
-    # ✅ Append the new user message
-    config = {
-        "configurable": {
-            "thread_id": f"notebook-session"
-        }
-    }
-
-
-    logger.info(f"MESSAGES: {messages}")
-    #logger.info(f"CHECKPOINTS: {checkpoints}")
-    result = await compiled.ainvoke(
-        {"messages": messages},
-        config=config
-    )
-    return result
-
-  
-

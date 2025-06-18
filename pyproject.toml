@@ -47,9 +47,11 @@ package-data = {}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["GrammarPersona", "CommentPersona"]
+include = ["GrammarPersona", "LinterPersona", "ImportsPersona",  "SuggestionPersona"]
 
 [project.entry-points."jupyter_ai.personas"]
 # Replace with your actual persona class path
-grammar_editor = "GrammarPersona.persona:GrammarEditor"
-code_commenter = "CommentPersona.persona:CodeCommenter"
+grammar_persona = "GrammarPersona.persona:GrammarPersona"
+linter_persona = "LinterPersona.persona:LinterPersona"
+imports_persona = "ImportsPersona.persona:ImportsPersona"
+suggestion_persona = "SuggestionPersona.persona:SuggestionPersona"

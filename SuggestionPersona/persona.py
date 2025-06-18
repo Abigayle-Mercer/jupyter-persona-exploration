@@ -12,7 +12,7 @@ from .agent import run_langgraph_agent as external_run_langgraph_agent
 from .agent import create_langgraph_agent as external_create_langgraph_agent
 from langchain_core.tools import tool
 
-from .agent import create_supervisor_agent, run_supervisor_agent
+from .agent import run_supervisor_agent, create_supervisor_agent
 
 from dotenv import load_dotenv
 import os
@@ -21,25 +21,6 @@ import os
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = api_key
-
-def extract_write_to_markdown_cell_calls(messages):
-    write_calls = []
-
-    for msg in messages:
-        # Try to access tool calls from both dicts and AIMessage-like objects
-        tool_calls = []
-        if isinstance(msg, dict):
-            tool_calls = msg.get("tool_calls", []) or msg.get("additional_kwargs", {}).get("tool_calls", [])
-        else:
-            tool_calls = getattr(msg, "tool_calls", []) or getattr(msg, "additional_kwargs", {}).get("tool_calls", [])
-
-        # Loop through all tool calls in this message
-        for tool_call in tool_calls:
-            if tool_call.get("name") == "write_to_markdown_cell":
-                write_calls.append(tool_call)
-
-    return write_calls
-
 
 def notebooks_are_different(current_cells, prev_cells):
     if not prev_cells:
@@ -62,11 +43,33 @@ def notebooks_are_different(current_cells, prev_cells):
 
 
 
+
+
+def extract_suggestion_tool_calls(messages):
+    write_calls = []
+
+    for msg in messages:
+        # Try to access tool calls from both dicts and AIMessage-like objects
+        tool_calls = []
+        if isinstance(msg, dict):
+            tool_calls = msg.get("tool_calls", []) or msg.get("additional_kwargs", {}).get("tool_calls", [])
+        else:
+            tool_calls = getattr(msg, "tool_calls", []) or getattr(msg, "additional_kwargs", {}).get("tool_calls", [])
+
+        # Loop through all tool calls in this message
+        for tool_call in tool_calls:
+            if tool_call.get("name") == "make_suggestion":
+                write_calls.append(tool_call)
+
+    return write_calls
+
+
+
 class State(TypedDict):
     messages: list
 
 
-class GrammarPersona(BasePersona):
+class SuggestionPersona(BasePersona):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -80,11 +83,12 @@ class GrammarPersona(BasePersona):
     @property
     def defaults(self):
         return PersonaDefaults(
-            name="GrammarPersona",
-            description="A Jupyter AI Assistant who can write to notebooks to fix grammar mistakes",
+            name="SuggestionPersona",
+            description="A Jupyter AI Assistant to suggest edits and addtions from the chat.",
             avatar_path="/api/ai/static/jupyternaut.svg",
             system_prompt="You are a function-calling assistant operating inside a JupyterLab environment, use your tools to operate on the notebook!",
         )
+
 
     def get_active_cell(self, notebook):
         """Return the ID of the currently selected cell of a given notebook, or None if none are active."""
@@ -138,7 +142,7 @@ class GrammarPersona(BasePersona):
 
         self.log.warning(f"❌ No active notebook found for client_id: {client_id}")
         return None
-
+    
     async def create_langgraph_agent(self, notebook: YNotebook):
         handler = CallContext.get(CallContext.JUPYTER_HANDLER)
         serverapp = handler.serverapp
@@ -154,26 +158,25 @@ class GrammarPersona(BasePersona):
             raw_tools,
             notebook,
             self.id,
-            self.get_active_cell,
         )
         return agent
+        
 
-    async def _run_with_flag_reset(self, tone_prompt, path, notebook):
+
+
+
+    async def _run_with_flag_reset(self, path):
         """Run the LangGraph agent with the given prompts and clear the busy flag."""
         try:
             agent = self._notebooks[path]["agent"]
             history = self._notebooks[path]["history"]
-            current_cell = self.get_active_cell(notebook)
-            messages = await external_run_langgraph_agent(self.log, agent, history, tone_prompt, current_cell)
-            calls = extract_write_to_markdown_cell_calls(messages['messages'])
-            self._notebooks[path]["history"].append(calls)
+            messages = await external_run_langgraph_agent(self.log, agent, history)
+            suggestions = extract_suggestion_tool_calls(messages['messages'])
+            self._notebooks[path]["history"].append(suggestions)
         finally:
             self._collab_task_in_progress = False
 
-
-
-
-    async def start_collaborative_session(self, ynotebook: YNotebook, path: str, tone_prompt):
+    async def start_collaborative_session(self, ynotebook: YNotebook, path: str):
         """
         Observes awareness (cursor position, etc) and reacts when a user changes their selection.
         """
@@ -205,7 +208,7 @@ class GrammarPersona(BasePersona):
 
                     self._collab_task_in_progress = True
                     self._running_task = asyncio.create_task(
-                        self._run_with_flag_reset(tone_prompt, path, ynotebook)
+                        self._run_with_flag_reset(path)
                     )
         agent = await self.create_langgraph_agent(ynotebook)
         self._notebooks[path]["agent"] = agent
@@ -216,9 +219,7 @@ class GrammarPersona(BasePersona):
         self._notebooks[path]["observer"] = (awareness, unsubscribe)
         self.log.info(f"✅ Awareness observer registered for notebook: {path}")
 
-  
-
-    async def _handle_global_awareness_change(self, client_id, tone_prompt):
+    async def _handle_global_awareness_change(self, client_id):
         """Respond to a global awareness update by tracking the newly active notebook.
 
         If the user switches to a different notebook (based on global awareness state),
@@ -248,14 +249,14 @@ class GrammarPersona(BasePersona):
             }
             if notebook:
                 await self.start_collaborative_session(
-                    notebook, active_notebook_path, tone_prompt
+                    notebook, active_notebook_path
                 )
             else:
                 self.log.info(
                     f"THERE WAS NO COLLABORATIVE NOTEBOOK OBSERVER STARTED FOR {active_notebook_path}"
                 )
 
-    async def start_global_observation(self, client_id, tone_prompt):
+    async def start_global_observation(self, client_id):
         """
         Observes awareness changes in global awarness
         """
@@ -270,7 +271,7 @@ class GrammarPersona(BasePersona):
 
         def on_awareness_change(event_type, data):
             asyncio.create_task(
-                self._handle_global_awareness_change(client_id, tone_prompt)
+                self._handle_global_awareness_change(client_id)
             )
 
         awareness = doc.awareness
@@ -285,16 +286,14 @@ class GrammarPersona(BasePersona):
         client_id = message.sender
 
         @tool
-        async def start_collaborative_session(tone_prompt = "") -> str:
-            """Starts a comment adding collaborative session. Optionally accepts a tone prompt for the use of the agent that will edit the notebook.
-            DO NOT ADD A TONE PROMPT UNLESS THE USER SPECIFICALLY SAYS TO!
-            """
-            await self.start_global_observation(client_id, tone_prompt)
+        async def start_collaborative_session() -> str:
+            """Starts a comment adding collaborative session. """
+            await self.start_global_observation(client_id)
             return f"Collaborative session started."
 
         @tool
         async def stop_collaborative_session() -> str:
-            """Stops the current collaborative comment adding session."""
+            """Stops the current collaborative session."""
 
             # Unregister global awareness observer
             if self._global_awareness_observer:
@@ -333,6 +332,8 @@ class GrammarPersona(BasePersona):
                     append=False,
                 )
             return "Typing stream completed."
+        
+
 
         tools = [start_collaborative_session, stop_collaborative_session]
         if self._created_agent == False: 
@@ -346,4 +347,5 @@ class GrammarPersona(BasePersona):
         
         result = await run_supervisor_agent(self.log, self.supervisor_agent, message.body, self._results)
         self.log.info(f"RESULT: {result}")
+
         self._results = result

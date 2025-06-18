@@ -22,7 +22,8 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = api_key
 
-def extract_write_to_markdown_cell_calls(messages):
+
+def extract_write_to_code_cell_calls(messages):
     write_calls = []
 
     for msg in messages:
@@ -35,10 +36,11 @@ def extract_write_to_markdown_cell_calls(messages):
 
         # Loop through all tool calls in this message
         for tool_call in tool_calls:
-            if tool_call.get("name") == "write_to_markdown_cell":
+            if tool_call.get("name") == "write_to_code_cell":
                 write_calls.append(tool_call)
 
     return write_calls
+
 
 
 def notebooks_are_different(current_cells, prev_cells):
@@ -61,12 +63,11 @@ def notebooks_are_different(current_cells, prev_cells):
         return True
 
 
-
 class State(TypedDict):
     messages: list
 
 
-class GrammarPersona(BasePersona):
+class LinterPersona(BasePersona):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -80,8 +81,8 @@ class GrammarPersona(BasePersona):
     @property
     def defaults(self):
         return PersonaDefaults(
-            name="GrammarPersona",
-            description="A Jupyter AI Assistant who can write to notebooks to fix grammar mistakes",
+            name="LinterPersona",
+            description="A Jupyter AI Assistant who can write to notebooks to add comments",
             avatar_path="/api/ai/static/jupyternaut.svg",
             system_prompt="You are a function-calling assistant operating inside a JupyterLab environment, use your tools to operate on the notebook!",
         )
@@ -139,6 +140,7 @@ class GrammarPersona(BasePersona):
         self.log.warning(f"❌ No active notebook found for client_id: {client_id}")
         return None
 
+
     async def create_langgraph_agent(self, notebook: YNotebook):
         handler = CallContext.get(CallContext.JUPYTER_HANDLER)
         serverapp = handler.serverapp
@@ -157,7 +159,7 @@ class GrammarPersona(BasePersona):
             self.get_active_cell,
         )
         return agent
-
+    
     async def _run_with_flag_reset(self, tone_prompt, path, notebook):
         """Run the LangGraph agent with the given prompts and clear the busy flag."""
         try:
@@ -165,12 +167,10 @@ class GrammarPersona(BasePersona):
             history = self._notebooks[path]["history"]
             current_cell = self.get_active_cell(notebook)
             messages = await external_run_langgraph_agent(self.log, agent, history, tone_prompt, current_cell)
-            calls = extract_write_to_markdown_cell_calls(messages['messages'])
+            calls = extract_write_to_code_cell_calls(messages['messages'])
             self._notebooks[path]["history"].append(calls)
         finally:
             self._collab_task_in_progress = False
-
-
 
 
     async def start_collaborative_session(self, ynotebook: YNotebook, path: str, tone_prompt):
@@ -216,8 +216,6 @@ class GrammarPersona(BasePersona):
         self._notebooks[path]["observer"] = (awareness, unsubscribe)
         self.log.info(f"✅ Awareness observer registered for notebook: {path}")
 
-  
-
     async def _handle_global_awareness_change(self, client_id, tone_prompt):
         """Respond to a global awareness update by tracking the newly active notebook.
 
@@ -254,7 +252,6 @@ class GrammarPersona(BasePersona):
                 self.log.info(
                     f"THERE WAS NO COLLABORATIVE NOTEBOOK OBSERVER STARTED FOR {active_notebook_path}"
                 )
-
     async def start_global_observation(self, client_id, tone_prompt):
         """
         Observes awareness changes in global awarness
@@ -285,11 +282,9 @@ class GrammarPersona(BasePersona):
         client_id = message.sender
 
         @tool
-        async def start_collaborative_session(tone_prompt = "") -> str:
-            """Starts a comment adding collaborative session. Optionally accepts a tone prompt for the use of the agent that will edit the notebook.
-            DO NOT ADD A TONE PROMPT UNLESS THE USER SPECIFICALLY SAYS TO!
-            """
-            await self.start_global_observation(client_id, tone_prompt)
+        async def start_collaborative_session() -> str:
+            """Starts a comment adding collaborative session. Optionally accepts a tone prompt."""
+            await self.start_global_observation(client_id, "")
             return f"Collaborative session started."
 
         @tool
@@ -347,3 +342,4 @@ class GrammarPersona(BasePersona):
         result = await run_supervisor_agent(self.log, self.supervisor_agent, message.body, self._results)
         self.log.info(f"RESULT: {result}")
         self._results = result
+
